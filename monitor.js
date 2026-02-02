@@ -1,20 +1,20 @@
 import { chromium } from "playwright";
 import fs from "fs";
 import fetch from "node-fetch";
+import { login } from "./login.js";
 
 // ====== НАСТРОЙКИ ======
 const URL = "https://grnd.gg/admin/complaints";
-const CHECK_INTERVAL = 30_000; // 30 секунд
+const CHECK_INTERVAL = 30_000;
 const STORAGE_FILE = "notified_ids.json";
 
 // ====== DISCORD ======
 const DISCORD_WEBHOOK =
   "https://discord.com/api/webhooks/1466511287914598410/MRNNjznKKpDKW0l6cLG312lUs_j54YbVZHGA0AuEOawXqJR9r--5t7QM37MlVmwBbfBe";
 
-// ✅ ТЕГАЕМ РОЛЬ (задай в Variables / .env)
 const DISCORD_ROLE_ID = process.env.DISCORD_ROLE_ID;
 
-// ====== БЕЗОПАСНОСТЬ ПРОЦЕССА ======
+// ====== SAFETY ======
 process.on("unhandledRejection", err => {
   console.error("❌ UNHANDLED REJECTION:", err?.stack || err);
 });
@@ -22,7 +22,7 @@ process.on("uncaughtException", err => {
   console.error("❌ UNCAUGHT EXCEPTION:", err?.stack || err);
 });
 
-// ====== ЗАГРУЗКА ID ======
+// ====== STORAGE ======
 const notified = fs.existsSync(STORAGE_FILE)
   ? new Set(JSON.parse(fs.readFileSync(STORAGE_FILE, "utf8")))
   : new Set();
@@ -31,10 +31,10 @@ function saveNotified() {
   fs.writeFileSync(STORAGE_FILE, JSON.stringify([...notified], null, 2));
 }
 
-// ====== DISCORD SEND (с ретраями) ======
+// ====== DISCORD SEND ======
 async function sendDiscord(c) {
   if (!DISCORD_ROLE_ID) {
-    throw new Error("DISCORD_ROLE_ID не задан. Добавь переменную окружения DISCORD_ROLE_ID (ID роли).");
+    throw new Error("DISCORD_ROLE_ID не задан (нужен ID роли).");
   }
 
   const payload = {
@@ -87,10 +87,9 @@ async function sendDiscord(c) {
 
 // ====== ИЗВЛЕЧЕНИЕ ЖАЛОБ (ТАБЛИЦА) ======
 async function getComplaints(page) {
-  // Ждём таблицу (если жалоб 0 — таблица обычно всё равно есть, но строк может не быть)
   await page.waitForSelector(".table-component-index table", { timeout: 20000 });
 
-  const complaints = await page.evaluate(() => {
+  return await page.evaluate(() => {
     return [...document.querySelectorAll(".table-component-index table tbody tr")]
       .map(row => {
         const tds = row.querySelectorAll("td");
@@ -105,18 +104,20 @@ async function getComplaints(page) {
       })
       .filter(Boolean);
   });
-
-  return complaints;
 }
 
 // ====== MAIN ======
 (async () => {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    storageState: "auth.json"
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
 
+  const context = await browser.newContext();
   const page = await context.newPage();
+
+  // ✅ ВАЖНО: авторизация/куки делает login.js (сам создаст auth.json)
+  await login(page);
 
   console.log("🤖 Бот запущен, мониторинг начат");
 
@@ -124,9 +125,12 @@ async function getComplaints(page) {
     try {
       await page.goto(URL, { waitUntil: "networkidle" });
 
-      // Если вдруг редиректнуло на логин — значит auth.json невалиден
+      // если вдруг не на странице жалоб — пробуем перелогиниться
       if (page.url().includes("/login")) {
-        throw new Error("Не авторизован: открылась страница логина (auth.json не применился)");
+        console.warn("⚠️ Разлогинило. Перелогин…");
+        try { fs.unlinkSync("./auth.json"); } catch {}
+        await login(page);
+        await page.goto(URL, { waitUntil: "networkidle" });
       }
 
       const complaints = await getComplaints(page);
@@ -138,11 +142,9 @@ async function getComplaints(page) {
         if (!c?.id) continue;
         if (notified.has(c.id)) continue;
 
-        // notified.add только после успешной отправки
         await sendDiscord(c);
         notified.add(c.id);
         sent++;
-
         await new Promise(r => setTimeout(r, 400));
       }
 
