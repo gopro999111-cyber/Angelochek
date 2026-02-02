@@ -11,7 +11,6 @@ const STORAGE_FILE = "notified_ids.json";
 // ====== DISCORD ======
 const DISCORD_WEBHOOK =
   "https://discord.com/api/webhooks/1466511287914598410/MRNNjznKKpDKW0l6cLG312lUs_j54YbVZHGA0AuEOawXqJR9r--5t7QM37MlVmwBbfBe";
-
 const DISCORD_ROLE_ID = process.env.DISCORD_ROLE_ID;
 
 // ====== SAFETY ======
@@ -22,7 +21,7 @@ process.on("uncaughtException", err => {
   console.error("❌ UNCAUGHT EXCEPTION:", err?.stack || err);
 });
 
-// ====== STORAGE ======
+// ====== ЗАГРУЗКА ID ======
 const notified = fs.existsSync(STORAGE_FILE)
   ? new Set(JSON.parse(fs.readFileSync(STORAGE_FILE, "utf8")))
   : new Set();
@@ -31,10 +30,9 @@ function saveNotified() {
   fs.writeFileSync(STORAGE_FILE, JSON.stringify([...notified], null, 2));
 }
 
-// ====== DISCORD SEND ======
 async function sendDiscord(c) {
   if (!DISCORD_ROLE_ID) {
-    throw new Error("DISCORD_ROLE_ID не задан (нужен ID роли).");
+    throw new Error("DISCORD_ROLE_ID не задан. Добавь переменную окружения DISCORD_ROLE_ID.");
   }
 
   const payload = {
@@ -77,15 +75,12 @@ async function sendDiscord(c) {
     }
 
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `Discord webhook error ${res.status} ${res.statusText}: ${text}`.slice(0, 800)
-    );
+    throw new Error(`Discord webhook error ${res.status}: ${text}`.slice(0, 800));
   }
 
   throw new Error("Discord webhook failed after retries (429)");
 }
 
-// ====== ИЗВЛЕЧЕНИЕ ЖАЛОБ (ТАБЛИЦА) ======
 async function getComplaints(page) {
   await page.waitForSelector(".table-component-index table", { timeout: 20000 });
 
@@ -96,17 +91,16 @@ async function getComplaints(page) {
         if (tds.length < 4) return null;
 
         return {
-          id: tds[0].innerText.trim(),
-          from: tds[1].innerText.trim(),
-          on: tds[2].innerText.trim(),
-          date: tds[3].innerText.trim()
+          id: (tds[0].innerText || "").trim(),
+          from: (tds[1].innerText || "").trim(),
+          on: (tds[2].innerText || "").trim(),
+          date: (tds[3].innerText || "").trim()
         };
       })
       .filter(Boolean);
   });
 }
 
-// ====== MAIN ======
 (async () => {
   const browser = await chromium.launch({
     headless: true,
@@ -116,7 +110,7 @@ async function getComplaints(page) {
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  // ✅ ВАЖНО: авторизация/куки делает login.js (сам создаст auth.json)
+  // ✅ ЛОГИНИМСЯ (создаст auth.json сам)
   await login(page);
 
   console.log("🤖 Бот запущен, мониторинг начат");
@@ -125,12 +119,10 @@ async function getComplaints(page) {
     try {
       await page.goto(URL, { waitUntil: "networkidle" });
 
-      // если вдруг не на странице жалоб — пробуем перелогиниться
+      console.log("🔎 Проверяю страницу, URL:", page.url());
+
       if (page.url().includes("/login")) {
-        console.warn("⚠️ Разлогинило. Перелогин…");
-        try { fs.unlinkSync("./auth.json"); } catch {}
-        await login(page);
-        await page.goto(URL, { waitUntil: "networkidle" });
+        throw new Error("Не авторизован: открылся /login");
       }
 
       const complaints = await getComplaints(page);
@@ -145,6 +137,7 @@ async function getComplaints(page) {
         await sendDiscord(c);
         notified.add(c.id);
         sent++;
+
         await new Promise(r => setTimeout(r, 400));
       }
 
@@ -152,7 +145,7 @@ async function getComplaints(page) {
         saveNotified();
         console.log(`✅ Отправлено новых жалоб: ${sent}`);
       } else {
-        console.log("⏳ Новых жалоб нет");
+        console.log("⏳ Новых жалоб нет (или все уже отправлены)");
       }
     } catch (err) {
       console.error("❌ Ошибка:", err?.message || err);
